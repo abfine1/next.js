@@ -1,6 +1,6 @@
 (globalThis.TURBOPACK = globalThis.TURBOPACK || []).push([
     "output/a5fc1_turbopack-tests_tests_snapshot_runtime_default_dev_runtime_input_index_73aab4ae.js",
-    {},
+    [],
     {"otherChunks":["output/b1abf_turbopack-tests_tests_snapshot_runtime_default_dev_runtime_input_index_9cac9e61.js"],"runtimeModuleIds":["[project]/turbopack/crates/turbopack-tests/tests/snapshot/runtime/default_dev_runtime/input/index.js [test] (ecmascript)"]}
 ]);
 (() => {
@@ -25,7 +25,7 @@ function defineProp(obj, name, options) {
     if (!hasOwnProperty.call(obj, name)) Object.defineProperty(obj, name, options);
 }
 function getOverwrittenModule(moduleCache, id) {
-    let module = moduleCache[id];
+    let module = moduleCache.get(id);
     if (!module) {
         // This is invoked when a module is merged into another module, thus it wasn't invoked via
         // instantiateModule and the cache entry wasn't created yet.
@@ -36,7 +36,7 @@ function getOverwrittenModule(moduleCache, id) {
             id,
             namespaceObject: undefined
         };
-        moduleCache[id] = module;
+        moduleCache.set(id, module);
     }
     return module;
 }
@@ -240,6 +240,59 @@ function createPromise() {
         reject: reject
     };
 }
+// Helper to coerce string values to `ModuleId` values
+function asModuleId(name) {
+    // TODO: should we just leverage a static condition on PRODUCTION?
+    let n = +name;
+    return Number.isNaN(n) ? name : n;
+}
+function asRequireCache(map) {
+    return new Proxy({}, {
+        get (_target, prop) {
+            if (typeof prop === 'string') {
+                return map.get(asModuleId(prop));
+            }
+            return undefined;
+        },
+        set (_target, prop, value) {
+            if (typeof prop === 'string') {
+                map.set(asModuleId(prop), value);
+                return true;
+            }
+            return false;
+        },
+        has (_target, prop) {
+            return typeof prop === 'string' && map.has(asModuleId(prop));
+        },
+        ownKeys (_target) {
+            return Array.from(map.keys(), String);
+        },
+        getOwnPropertyDescriptor (_target, prop) {
+            if (typeof prop === 'string' && map.has(asModuleId(prop))) {
+                return {
+                    enumerable: true,
+                    configurable: false
+                };
+            }
+            return undefined;
+        },
+        deleteProperty (_target, prop) {
+            if (typeof prop === 'string') {
+                return map.delete(prop) || map.delete(+prop);
+            }
+            return false;
+        },
+        defineProperty () {
+            return false;
+        },
+        preventExtensions () {
+            return false;
+        },
+        setPrototypeOf () {
+            return false;
+        }
+    });
+}
 // everything below is adapted from webpack
 // https://github.com/webpack/webpack/blob/6be4065ade1e252c1d8dcba4af0f43e32af1bdc1/lib/runtime/AsyncModuleRuntimeModule.js#L13
 const turbopackQueues = Symbol('turbopack queues');
@@ -432,7 +485,7 @@ async function loadChunk(source, chunkData) {
     }
     const includedList = chunkData.included || [];
     const modulesPromises = includedList.map((included)=>{
-        if (moduleFactories[included]) return true;
+        if (moduleFactories.has(included)) return true;
         return availableModules.get(included);
     });
     if (modulesPromises.length > 0 && modulesPromises.every((p)=>p)) {
@@ -611,19 +664,26 @@ function getPathFromScript(chunkScript) {
 }
 function registerChunk([chunkScript, chunkModules, runtimeParams]) {
     const chunkPath = getPathFromScript(chunkScript);
-    for (const [moduleId, moduleFactory] of Object.entries(chunkModules)){
-        if (!moduleFactories[moduleId]) {
-            if (Array.isArray(moduleFactory)) {
-                let [moduleFactoryFn, otherIds] = moduleFactory;
-                moduleFactories[moduleId] = moduleFactoryFn;
-                for (const otherModuleId of otherIds){
-                    moduleFactories[otherModuleId] = moduleFactoryFn;
-                }
-            } else {
-                moduleFactories[moduleId] = moduleFactory;
+    let i = 0;
+    while(i < chunkModules.length){
+        const moduleFactoryFn = chunkModules[i];
+        i++;
+        let moduleId = chunkModules[i];
+        i++;
+        addModuleToChunk(moduleId, chunkPath);
+        if (moduleFactories.has(moduleId)) {
+            moduleFactories.set(moduleId, moduleFactoryFn);
+            while(i < chunkModules.length && // @ts-ignore
+            typeof (moduleId = chunkModules[i]) !== 'function'){
+                i++;
+                moduleFactories.set(moduleId, moduleFactoryFn);
+            }
+        } else {
+            // skip all the ids we already loaded
+            while(i < chunkModules.length && typeof chunkModules[i] !== 'function'){
+                i++;
             }
         }
-        addModuleToChunk(moduleId, chunkPath);
     }
     return BACKEND.registerChunk(chunkPath, runtimeParams);
 }
@@ -648,7 +708,10 @@ const regexCssUrl = /\.css(?:\?[^#]*)?(?:#.*)?$/;
  *
  * It will be appended to the runtime code of each runtime right after the
  * shared runtime utils.
- */ /* eslint-disable @typescript-eslint/no-unused-vars */ const devModuleCache = Object.create(null);
+ */ /* eslint-disable @typescript-eslint/no-unused-vars */ const devModuleCache = new Map();
+// A view on `devModuleCache` as an object
+// TODO: allocate this on demand, it is rarely needed
+const devModuleRequireCache = asRequireCache(devModuleCache);
 class UpdateApplyError extends Error {
     name = 'UpdateApplyError';
     dependencyChain;
@@ -671,7 +734,7 @@ class UpdateApplyError extends Error {
  * Gets or instantiates a runtime module.
  */ // @ts-ignore
 function getOrInstantiateRuntimeModule(moduleId, chunkPath) {
-    const module = devModuleCache[moduleId];
+    const module = devModuleCache.get(moduleId);
     if (module) {
         if (module.error) {
             throw module.error;
@@ -691,7 +754,7 @@ const getOrInstantiateModuleFromParent = (id, sourceModule)=>{
     if (!sourceModule.hot.active) {
         console.warn(`Unexpected import of module ${id} from module ${sourceModule.id}, which was deleted by an HMR update`);
     }
-    const module = devModuleCache[id];
+    const module = devModuleCache.get(id);
     if (sourceModule.children.indexOf(id) === -1) {
         sourceModule.children.push(id);
     }
@@ -709,7 +772,7 @@ const getOrInstantiateModuleFromParent = (id, sourceModule)=>{
 function instantiateModule(moduleId, source) {
     // We are in development, this is always a string.
     let id = moduleId;
-    const moduleFactory = moduleFactories[id];
+    const moduleFactory = moduleFactories.get(id);
     if (typeof moduleFactory !== 'function') {
         // This can happen if modules incorrectly handle HMR disposes/updates,
         // e.g. when they keep a `setTimeout` around which still executes old code
@@ -761,7 +824,7 @@ function instantiateModule(moduleId, source) {
         namespaceObject: undefined,
         hot
     };
-    devModuleCache[id] = module;
+    devModuleCache.set(id, module);
     moduleHotState.set(module, hotState);
     // NOTE(alexkirsz) This can fail when the module encounters a runtime error.
     try {
@@ -783,7 +846,7 @@ function instantiateModule(moduleId, source) {
                 v: exportValue.bind(null, module, devModuleCache),
                 n: exportNamespace.bind(null, module, devModuleCache),
                 m: module,
-                c: devModuleCache,
+                c: devModuleRequireCache,
                 C: null,
                 M: moduleFactories,
                 l: loadChunk.bind(null, sourceInfo),
@@ -925,7 +988,7 @@ function computedInvalidatedModules(invalidated) {
 function computeOutdatedSelfAcceptedModules(outdatedModules) {
     const outdatedSelfAcceptedModules = [];
     for (const moduleId of outdatedModules){
-        const module = devModuleCache[moduleId];
+        const module = devModuleCache.get(moduleId);
         const hotState = moduleHotState.get(module);
         if (module && hotState.selfAccepted && !hotState.selfInvalidated) {
             outdatedSelfAcceptedModules.push({
@@ -969,9 +1032,9 @@ function disposePhase(outdatedModules, disposedModules) {
     // We also want to keep track of previous parents of the outdated modules.
     const outdatedModuleParents = new Map();
     for (const moduleId of outdatedModules){
-        const oldModule = devModuleCache[moduleId];
+        const oldModule = devModuleCache.get(moduleId);
         outdatedModuleParents.set(moduleId, oldModule?.parents);
-        delete devModuleCache[moduleId];
+        devModuleCache.delete(moduleId);
     }
     // TODO(alexkirsz) Dependencies: remove outdated dependency from module
     // children.
@@ -992,7 +1055,7 @@ function disposePhase(outdatedModules, disposedModules) {
  * If this was done in this method, the following disposeModule calls won't find
  * the module from the module id in the cache.
  */ function disposeModule(moduleId, mode) {
-    const module = devModuleCache[moduleId];
+    const module = devModuleCache.get(moduleId);
     if (!module) {
         return;
     }
@@ -1012,7 +1075,7 @@ function disposePhase(outdatedModules, disposedModules) {
     // It will be added back once the module re-instantiates and imports its
     // children again.
     for (const childId of module.children){
-        const child = devModuleCache[childId];
+        const child = devModuleCache.get(childId);
         if (!child) {
             continue;
         }
@@ -1023,7 +1086,7 @@ function disposePhase(outdatedModules, disposedModules) {
     }
     switch(mode){
         case 'clear':
-            delete devModuleCache[module.id];
+            devModuleCache.delete(module.id);
             moduleHotData.delete(module.id);
             break;
         case 'replace':
@@ -1036,7 +1099,7 @@ function disposePhase(outdatedModules, disposedModules) {
 function applyPhase(outdatedSelfAcceptedModules, newModuleFactories, outdatedModuleParents, reportError) {
     // Update module factories.
     for (const [moduleId, factory] of newModuleFactories.entries()){
-        moduleFactories[moduleId] = factory;
+        moduleFactories.set(moduleId, factory);
     }
     // TODO(alexkirsz) Run new runtime entries here.
     // TODO(alexkirsz) Dependencies: call accept handlers for outdated deps.
@@ -1052,7 +1115,7 @@ function applyPhase(outdatedSelfAcceptedModules, newModuleFactories, outdatedMod
                 try {
                     errorHandler(err, {
                         moduleId,
-                        module: devModuleCache[moduleId]
+                        module: devModuleCache.get(moduleId)
                     });
                 } catch (err2) {
                     reportError(err2);
@@ -1238,7 +1301,7 @@ function getAffectedModuleEffects(moduleId) {
                 dependencyChain
             };
         }
-        const module = devModuleCache[moduleId];
+        const module = devModuleCache.get(moduleId);
         const hotState = moduleHotState.get(module);
         if (// The module is not in the cache. Since this is a "modified" update,
         // it means that the module was never instantiated before.
@@ -1263,7 +1326,7 @@ function getAffectedModuleEffects(moduleId) {
             continue;
         }
         for (const parentId of module.parents){
-            const parent = devModuleCache[parentId];
+            const parent = devModuleCache.get(parentId);
             if (!parent) {
                 continue;
             }

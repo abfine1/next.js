@@ -63,7 +63,7 @@ function getOverwrittenModule(
   moduleCache: ModuleCache<Module>,
   id: ModuleId
 ): Module {
-  let module = moduleCache[id]
+  let module = moduleCache.get(id)
   if (!module) {
     // This is invoked when a module is merged into another module, thus it wasn't invoked via
     // instantiateModule and the cache entry wasn't created yet.
@@ -74,7 +74,7 @@ function getOverwrittenModule(
       id,
       namespaceObject: undefined,
     }
-    moduleCache[id] = module
+    moduleCache.set(id, module)
   }
   return module
 }
@@ -361,6 +361,104 @@ function createPromise<T>() {
     promise,
     resolve: resolve!,
     reject: reject!,
+  }
+}
+
+// Helper to coerce string values to `ModuleId` values
+function asModuleId(name: string): ModuleId {
+  // TODO: should we just leverage a static condition on PRODUCTION?
+  let n = +name
+  return Number.isNaN(n) ? name : n
+}
+
+function asRequireCache(map: ModuleCache<Module>): Record<ModuleId, Module> {
+  return new Proxy(
+    {},
+    {
+      get(_target, prop: string | symbol) {
+        if (typeof prop === 'string') {
+          return map.get(asModuleId(prop))
+        }
+        return undefined
+      },
+      set(_target, prop: string | symbol, value: any): boolean {
+        if (typeof prop === 'string') {
+          map.set(asModuleId(prop), value)
+          return true
+        }
+        return false
+      },
+      has(_target, prop: string | symbol) {
+        return typeof prop === 'string' && map.has(asModuleId(prop))
+      },
+      ownKeys(_target) {
+        return Array.from(map.keys(), String)
+      },
+      getOwnPropertyDescriptor(_target, prop: string | symbol) {
+        if (typeof prop === 'string' && map.has(asModuleId(prop))) {
+          return {
+            enumerable: true,
+            configurable: false,
+          }
+        }
+        return undefined
+      },
+      deleteProperty(_target, prop: string | symbol) {
+        if (typeof prop === 'string') {
+          return map.delete(prop) || map.delete(+prop)
+        }
+        return false
+      },
+      defineProperty() {
+        return false
+      },
+      preventExtensions() {
+        return false
+      },
+      setPrototypeOf() {
+        return false
+      },
+    }
+  )
+}
+
+// Load the module exports of a chunk into the `moduleFactories`
+// The CompressedModuleFactories format is
+// - a module factory function
+// - 1 or more module ids
+// So walking this is a little complex but the flat structure is also fast to
+// traverse, we can use `typeof` operators to distinguish the two cases.
+function installModuleFactories(
+  chunkModules: CompressedModuleFactories,
+  moduleFactories: ModuleFactories,
+  newModuleId?: (id: ModuleId) => void
+) {
+  let i = 0
+  while (i < chunkModules.length) {
+    const moduleFactoryFn = chunkModules[i] as Function
+    i++
+    let moduleId = chunkModules[i] as ModuleId
+    i++
+    let end = i
+    // skip all the ids we already loaded
+    while (
+      end < chunkModules.length &&
+      typeof chunkModules[end] !== 'function'
+    ) {
+      end++
+    }
+    if (!moduleFactories.has(moduleId)) {
+      newModuleId?.(moduleId)
+      moduleFactories.set(moduleId, moduleFactoryFn)
+      for (; i < end; i++) {
+        let moduleId = chunkModules[i] as ModuleId
+        newModuleId?.(moduleId)
+        moduleFactories.set(moduleId, moduleFactoryFn)
+      }
+    } else {
+      // skip all the ids we already loaded
+      i = end
+    }
   }
 }
 

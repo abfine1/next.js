@@ -62,14 +62,11 @@ type LoadWebAssemblyModule = (
   edgeModule: () => WebAssembly.Module
 ) => WebAssembly.Module
 
-type ModuleCache<M> = Record<ModuleId, M>
+type ModuleCache<M> = Map<ModuleId, M>
 // TODO properly type values here
-type ModuleFactories = Record<ModuleId, Function>
-// The value is an array with scope hoisting
-type CompressedModuleFactories = Record<
-  ModuleId,
-  Function | [Function, ModuleId[]]
->
+type ModuleFactories = Map<ModuleId, Function>
+// This is an alternating sequence of module ids and functions
+type CompressedModuleFactories = Array<ModuleId | Function>
 
 type RelativeURL = (inputUrl: string) => void
 type ResolvePathFromModule = (moduleId: string) => string

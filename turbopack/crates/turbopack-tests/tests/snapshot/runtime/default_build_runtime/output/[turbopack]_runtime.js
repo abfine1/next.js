@@ -14,7 +14,7 @@ function defineProp(obj, name, options) {
     if (!hasOwnProperty.call(obj, name)) Object.defineProperty(obj, name, options);
 }
 function getOverwrittenModule(moduleCache, id) {
-    let module = moduleCache[id];
+    let module = moduleCache.get(id);
     if (!module) {
         // This is invoked when a module is merged into another module, thus it wasn't invoked via
         // instantiateModule and the cache entry wasn't created yet.
@@ -25,7 +25,7 @@ function getOverwrittenModule(moduleCache, id) {
             id,
             namespaceObject: undefined
         };
-        moduleCache[id] = module;
+        moduleCache.set(id, module);
     }
     return module;
 }
@@ -228,6 +228,59 @@ function createPromise() {
         resolve: resolve,
         reject: reject
     };
+}
+// Helper to coerce string values to `ModuleId` values
+function asModuleId(name) {
+    // TODO: should we just leverage a static condition on PRODUCTION?
+    let n = +name;
+    return Number.isNaN(n) ? name : n;
+}
+function asRequireCache(map) {
+    return new Proxy({}, {
+        get (_target, prop) {
+            if (typeof prop === 'string') {
+                return map.get(asModuleId(prop));
+            }
+            return undefined;
+        },
+        set (_target, prop, value) {
+            if (typeof prop === 'string') {
+                map.set(asModuleId(prop), value);
+                return true;
+            }
+            return false;
+        },
+        has (_target, prop) {
+            return typeof prop === 'string' && map.has(asModuleId(prop));
+        },
+        ownKeys (_target) {
+            return Array.from(map.keys(), String);
+        },
+        getOwnPropertyDescriptor (_target, prop) {
+            if (typeof prop === 'string' && map.has(asModuleId(prop))) {
+                return {
+                    enumerable: true,
+                    configurable: false
+                };
+            }
+            return undefined;
+        },
+        deleteProperty (_target, prop) {
+            if (typeof prop === 'string') {
+                return map.delete(prop) || map.delete(+prop);
+            }
+            return false;
+        },
+        defineProperty () {
+            return false;
+        },
+        preventExtensions () {
+            return false;
+        },
+        setPrototypeOf () {
+            return false;
+        }
+    });
 }
 // everything below is adapted from webpack
 // https://github.com/webpack/webpack/blob/6be4065ade1e252c1d8dcba4af0f43e32af1bdc1/lib/runtime/AsyncModuleRuntimeModule.js#L13
@@ -472,8 +525,11 @@ function stringifySourceInfo(source) {
 }
 const url = require('url');
 const fs = require('fs/promises');
-const moduleFactories = Object.create(null);
-const moduleCache = Object.create(null);
+const moduleFactories = new Map();
+const moduleCache = new Map();
+// A view on `devModuleCache` as an object
+// TODO: allocate this on demand, it is rarely needed
+const moduleRequireCache = asRequireCache(moduleCache);
 /**
  * Returns an absolute path to the given module's id.
  */ function createResolvePathFromModule(resolver) {
@@ -502,6 +558,30 @@ const chunkCache = new Map();
 function clearChunkCache() {
     chunkCache.clear();
 }
+// Load the module exports of a chunk into the `moduleFactories` and update our chunk loading caches
+function installModuleFactories(chunkModules) {
+    let i = 0;
+    while(i < chunkModules.length){
+        const moduleFactoryFn = chunkModules[i];
+        i++;
+        let moduleId = chunkModules[i];
+        i++;
+        let end = i;
+        // skip all the ids we already loaded
+        while(end < chunkModules.length && typeof chunkModules[end] !== 'function'){
+            end++;
+        }
+        if (!moduleFactories.has(moduleId)) {
+            moduleFactories.set(moduleId, moduleFactoryFn);
+            for(; i < end; i++){
+                moduleFactories.set(chunkModules[i], moduleFactoryFn);
+            }
+        } else {
+            // skip all the ids we already loaded
+            i = end;
+        }
+    }
+}
 function loadChunkPath(chunkPath, source) {
     if (!isJs(chunkPath)) {
         // We only support loading JS chunks in Node.js.
@@ -514,19 +594,7 @@ function loadChunkPath(chunkPath, source) {
     try {
         const resolved = path.resolve(RUNTIME_ROOT, chunkPath);
         const chunkModules = require(resolved);
-        for (const [moduleId, moduleFactory] of Object.entries(chunkModules)){
-            if (!moduleFactories[moduleId]) {
-                if (Array.isArray(moduleFactory)) {
-                    const [moduleFactoryFn, otherIds] = moduleFactory;
-                    moduleFactories[moduleId] = moduleFactoryFn;
-                    for (const otherModuleId of otherIds){
-                        moduleFactories[otherModuleId] = moduleFactoryFn;
-                    }
-                } else {
-                    moduleFactories[moduleId] = moduleFactory;
-                }
-            }
-        }
+        installModuleFactories(chunkModules);
         loadedChunks.add(chunkPath);
     } catch (e) {
         let errorMessage = `Failed to load chunk ${chunkPath}`;
@@ -538,26 +606,6 @@ function loadChunkPath(chunkPath, source) {
         });
     }
 }
-function loadChunkUncached(chunkPath) {
-    // resolve to an absolute path to simplify `require` handling
-    const resolved = path.resolve(RUNTIME_ROOT, chunkPath);
-    // TODO: consider switching to `import()` to enable concurrent chunk loading and async file io
-    // However this is incompatible with hot reloading (since `import` doesn't use the require cache)
-    const chunkModules = require(resolved);
-    for (const [moduleId, moduleFactory] of Object.entries(chunkModules)){
-        if (!moduleFactories[moduleId]) {
-            if (Array.isArray(moduleFactory)) {
-                const [moduleFactoryFn, otherIds] = moduleFactory;
-                moduleFactories[moduleId] = moduleFactoryFn;
-                for (const otherModuleId of otherIds){
-                    moduleFactories[otherModuleId] = moduleFactoryFn;
-                }
-            } else {
-                moduleFactories[moduleId] = moduleFactory;
-            }
-        }
-    }
-}
 function loadChunkAsync(source, chunkData) {
     const chunkPath = typeof chunkData === 'string' ? chunkData : chunkData.path;
     if (!isJs(chunkPath)) {
@@ -565,11 +613,17 @@ function loadChunkAsync(source, chunkData) {
         // This branch can be hit when trying to load a CSS chunk.
         return unsupportedLoadChunk;
     }
+    // NOTE: synchronous loading will also insert into the chunkCache, but we only read the chunkCache
+    // so that clearing it for hot reloading stil works.
     let entry = chunkCache.get(chunkPath);
     if (entry === undefined) {
         try {
-            // Load the chunk synchronously
-            loadChunkUncached(chunkPath);
+            // resolve to an absolute path to simplify `require` handling
+            const resolved = path.resolve(RUNTIME_ROOT, chunkPath);
+            // TODO: consider switching to `import()` to enable concurrent chunk loading and async file io
+            // However this is incompatible with hot reloading (since `import` doesn't use the require cache)
+            const chunkModules = require(resolved);
+            installModuleFactories(chunkModules);
             entry = loadedChunk;
         } catch (e) {
             let errorMessage = `Failed to load chunk ${chunkPath}`;
@@ -602,7 +656,7 @@ function getWorkerBlobURL(_chunks) {
     throw new Error('Worker blobs are not implemented yet for Node.js');
 }
 function instantiateModule(id, source) {
-    const moduleFactory = moduleFactories[id];
+    const moduleFactory = moduleFactories.get(id);
     if (typeof moduleFactory !== 'function') {
         // This can happen if modules incorrectly handle HMR disposes/updates,
         // e.g. when they keep a `setTimeout` around which still executes old code
@@ -627,11 +681,11 @@ function instantiateModule(id, source) {
         id,
         namespaceObject: undefined
     };
-    moduleCache[id] = module1;
+    moduleCache.set(id, module1);
     // NOTE(alexkirsz) This can fail when the module encounters a runtime error.
     try {
         const r = commonJsRequire.bind(null, module1);
-        moduleFactory.call(module1.exports, {
+        moduleFactory({
             a: asyncModule.bind(null, module1),
             e: module1.exports,
             r,
@@ -645,7 +699,7 @@ function instantiateModule(id, source) {
             v: exportValue.bind(null, module1, moduleCache),
             n: exportNamespace.bind(null, module1, moduleCache),
             m: module1,
-            c: moduleCache,
+            c: moduleRequireCache,
             M: moduleFactories,
             l: loadChunkAsync.bind(null, {
                 type: 1,
@@ -679,7 +733,7 @@ function instantiateModule(id, source) {
  * Retrieves a module from the cache, or instantiate it if it is not cached.
  */ // @ts-ignore
 function getOrInstantiateModuleFromParent(id, sourceModule) {
-    const module1 = moduleCache[id];
+    const module1 = moduleCache.get(id);
     if (module1) {
         return module1;
     }
@@ -700,7 +754,7 @@ function getOrInstantiateModuleFromParent(id, sourceModule) {
  * Retrieves a module from the cache, or instantiate it as a runtime module if it is not cached.
  */ // @ts-ignore TypeScript doesn't separate this module space from the browser runtime
 function getOrInstantiateRuntimeModule(moduleId, chunkPath) {
-    const module1 = moduleCache[moduleId];
+    const module1 = moduleCache.get(moduleId);
     if (module1) {
         if (module1.error) {
             throw module1.error;

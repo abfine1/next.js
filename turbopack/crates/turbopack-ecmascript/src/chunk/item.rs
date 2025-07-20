@@ -112,10 +112,6 @@ impl EcmascriptChunkItemContent {
         }
 
         let mut code = CodeBuilder::default();
-        let additional_ids = self.additional_ids.iter().try_join().await?;
-        if !additional_ids.is_empty() {
-            code += "["
-        }
         code += "((__turbopack_context__) => {\n";
         if self.options.strict {
             code += "\"use strict\";\n\n";
@@ -154,8 +150,8 @@ impl EcmascriptChunkItemContent {
         }
 
         code += "})";
-        if !additional_ids.is_empty() {
-            writeln!(code, ", {}]", StringifyJs(&additional_ids))?;
+        for additional_id in self.additional_ids.iter().try_join().await? {
+            writeln!(code, ", {}", StringifyJs(&*additional_id))?;
         }
 
         Ok(code.build().cell())

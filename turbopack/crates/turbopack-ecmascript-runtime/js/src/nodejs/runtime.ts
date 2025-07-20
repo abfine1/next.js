@@ -61,8 +61,11 @@ type ModuleFactory = (
 const url = require('url') as typeof import('url')
 const fs = require('fs/promises') as typeof import('fs/promises')
 
-const moduleFactories: ModuleFactories = Object.create(null)
-const moduleCache: ModuleCache<Module> = Object.create(null)
+const moduleFactories: ModuleFactories = new Map()
+const moduleCache: ModuleCache<Module> = new Map()
+// A view on `devModuleCache` as an object
+// TODO: allocate this on demand, it is rarely needed
+const moduleRequireCache = asRequireCache(moduleCache)
 
 /**
  * Returns an absolute path to the given module's id.
@@ -101,23 +104,6 @@ function clearChunkCache() {
   chunkCache.clear()
 }
 
-// Load the module exports of a chunk into the `moduleFactories` and update our chunk loading caches
-function installModuleFactories(chunkModules: CompressedModuleFactories) {
-  for (const [moduleId, moduleFactory] of Object.entries(chunkModules)) {
-    if (!moduleFactories[moduleId]) {
-      if (Array.isArray(moduleFactory)) {
-        const [moduleFactoryFn, otherIds] = moduleFactory
-        moduleFactories[moduleId] = moduleFactoryFn
-        for (const otherModuleId of otherIds) {
-          moduleFactories[otherModuleId] = moduleFactoryFn
-        }
-      } else {
-        moduleFactories[moduleId] = moduleFactory
-      }
-    }
-  }
-}
-
 function loadChunkPath(chunkPath: ChunkPath, source?: SourceInfo): void {
   if (!isJs(chunkPath)) {
     // We only support loading JS chunks in Node.js.
@@ -132,7 +118,7 @@ function loadChunkPath(chunkPath: ChunkPath, source?: SourceInfo): void {
   try {
     const resolved = path.resolve(RUNTIME_ROOT, chunkPath)
     const chunkModules: CompressedModuleFactories = require(resolved)
-    installModuleFactories(chunkModules)
+    installModuleFactories(chunkModules, moduleFactories)
     loadedChunks.add(chunkPath)
   } catch (e) {
     let errorMessage = `Failed to load chunk ${chunkPath}`
@@ -168,7 +154,7 @@ function loadChunkAsync(
       // TODO: consider switching to `import()` to enable concurrent chunk loading and async file io
       // However this is incompatible with hot reloading (since `import` doesn't use the require cache)
       const chunkModules: CompressedModuleFactories = require(resolved)
-      installModuleFactories(chunkModules)
+      installModuleFactories(chunkModules, moduleFactories)
       entry = loadedChunk
     } catch (e) {
       let errorMessage = `Failed to load chunk ${chunkPath}`
@@ -218,7 +204,7 @@ function getWorkerBlobURL(_chunks: ChunkPath[]): string {
 }
 
 function instantiateModule(id: ModuleId, source: SourceInfo): Module {
-  const moduleFactory = moduleFactories[id]
+  const moduleFactory = moduleFactories.get(id)
   if (typeof moduleFactory !== 'function') {
     // This can happen if modules incorrectly handle HMR disposes/updates,
     // e.g. when they keep a `setTimeout` around which still executes old code
@@ -246,12 +232,12 @@ function instantiateModule(id: ModuleId, source: SourceInfo): Module {
     id,
     namespaceObject: undefined,
   }
-  moduleCache[id] = module
+  moduleCache.set(id, module)
 
   // NOTE(alexkirsz) This can fail when the module encounters a runtime error.
   try {
     const r = commonJsRequire.bind(null, module)
-    moduleFactory.call(module.exports, {
+    moduleFactory({
       a: asyncModule.bind(null, module),
       e: module.exports,
       r,
@@ -265,7 +251,7 @@ function instantiateModule(id: ModuleId, source: SourceInfo): Module {
       v: exportValue.bind(null, module, moduleCache),
       n: exportNamespace.bind(null, module, moduleCache),
       m: module,
-      c: moduleCache,
+      c: moduleRequireCache,
       M: moduleFactories,
       l: loadChunkAsync.bind(null, { type: SourceType.Parent, parentId: id }),
       L: loadChunkAsyncByUrl.bind(null, {
@@ -303,7 +289,7 @@ function getOrInstantiateModuleFromParent(
   id: ModuleId,
   sourceModule: Module
 ): Module {
-  const module = moduleCache[id]
+  const module = moduleCache.get(id)
 
   if (module) {
     return module
@@ -333,7 +319,7 @@ function getOrInstantiateRuntimeModule(
   moduleId: ModuleId,
   chunkPath: ChunkPath
 ): Module {
-  const module = moduleCache[moduleId]
+  const module = moduleCache.get(moduleId)
   if (module) {
     if (module.error) {
       throw module.error

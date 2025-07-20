@@ -1,6 +1,6 @@
-module.exports = {
+module.exports = [
 
-"[project]/turbopack/crates/turbopack-tests/tests/snapshot/basic/async_chunk_build/input/import.js [test] (ecmascript, async loader)": ((__turbopack_context__) => {
+((__turbopack_context__) => {
 
 __turbopack_context__.v((parentImport) => {
     return Promise.all([
@@ -10,5 +10,5 @@ __turbopack_context__.v((parentImport) => {
     });
 });
 }),
-
-};
+"[project]/turbopack/crates/turbopack-tests/tests/snapshot/basic/async_chunk_build/input/import.js [test] (ecmascript, async loader)", 
+];

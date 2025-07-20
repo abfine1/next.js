@@ -31,8 +31,7 @@ type RuntimeParams = {
 
 type ChunkRegistration = [
   chunkPath: ChunkScript,
-  chunkModules: CompressedModuleFactories,
-  params: RuntimeParams | undefined,
+  ...([RuntimeParams] | CompressedModuleFactories),
 ]
 
 type ChunkList = {
@@ -132,7 +131,7 @@ async function loadChunk(
 
   const includedList = chunkData.included || []
   const modulesPromises = includedList.map((included) => {
-    if (moduleFactories[included]) return true
+    if (moduleFactories.has(included)) return true
     return availableModules.get(included)
   })
   if (modulesPromises.length > 0 && modulesPromises.every((p) => p)) {
@@ -374,23 +373,22 @@ function markChunkListAsRuntime(chunkListPath: ChunkListPath) {
 
 function registerChunk([
   chunkScript,
-  chunkModules,
-  runtimeParams,
+  ...chunkModulesOrRuntimeParams
 ]: ChunkRegistration) {
   const chunkPath = getPathFromScript(chunkScript)
-  for (const [moduleId, moduleFactory] of Object.entries(chunkModules)) {
-    if (!moduleFactories[moduleId]) {
-      if (Array.isArray(moduleFactory)) {
-        let [moduleFactoryFn, otherIds] = moduleFactory
-        moduleFactories[moduleId] = moduleFactoryFn
-        for (const otherModuleId of otherIds) {
-          moduleFactories[otherModuleId] = moduleFactoryFn
-        }
-      } else {
-        moduleFactories[moduleId] = moduleFactory
+  let runtimeParams
+  // When bootstrapping we are passed a single runtimeParams object so we can distinguish purely based on length
+  if (chunkModulesOrRuntimeParams.length === 1) {
+    runtimeParams = chunkModulesOrRuntimeParams[0] as RuntimeParams
+  } else {
+    runtimeParams = undefined
+    installModuleFactories(
+      chunkModulesOrRuntimeParams as CompressedModuleFactories,
+      moduleFactories,
+      (id: ModuleId) => {
+        addModuleToChunk(id, chunkPath)
       }
-    }
-    addModuleToChunk(moduleId, chunkPath)
+    )
   }
 
   return BACKEND.registerChunk(chunkPath, runtimeParams)

@@ -3,7 +3,10 @@
 
 declare var augmentContext: (context: unknown) => unknown
 
-const moduleCache: ModuleCache<Module> = {}
+const moduleCache: ModuleCache<Module> = new Map()
+// A view on `devModuleCache` as an object
+// TODO: allocate this on demand, it is rarely needed
+const moduleRequireCache = asRequireCache(devModuleCache)
 
 /**
  * Gets or instantiates a runtime module.
@@ -14,7 +17,7 @@ function getOrInstantiateRuntimeModule(
   moduleId: ModuleId,
   chunkPath: ChunkPath
 ): Module {
-  const module = moduleCache[moduleId]
+  const module = moduleCache.get(moduleId)
   if (module) {
     if (module.error) {
       throw module.error
@@ -34,7 +37,7 @@ function getOrInstantiateRuntimeModule(
 const getOrInstantiateModuleFromParent: GetOrInstantiateModuleFromParent<
   Module
 > = (id, sourceModule) => {
-  const module = moduleCache[id]
+  const module = moduleCache.get(id)
 
   if (module) {
     return module
@@ -47,7 +50,7 @@ const getOrInstantiateModuleFromParent: GetOrInstantiateModuleFromParent<
 }
 
 function instantiateModule(id: ModuleId, source: SourceInfo): Module {
-  const moduleFactory = moduleFactories[id]
+  const moduleFactory = moduleFactories.get(id)
   if (typeof moduleFactory !== 'function') {
     // This can happen if modules incorrectly handle HMR disposes/updates,
     // e.g. when they keep a `setTimeout` around which still executes old code
@@ -93,7 +96,7 @@ function instantiateModule(id: ModuleId, source: SourceInfo): Module {
     namespaceObject: undefined,
   }
 
-  moduleCache[id] = module
+  moduleCache.set(id, module)
 
   // NOTE(alexkirsz) This can fail when the module encounters a runtime error.
   try {
@@ -113,7 +116,7 @@ function instantiateModule(id: ModuleId, source: SourceInfo): Module {
         v: exportValue.bind(null, module, moduleCache),
         n: exportNamespace.bind(null, module, moduleCache),
         m: module,
-        c: moduleCache,
+        c: moduleRequireCache,
         M: moduleFactories,
         l: loadChunk.bind(null, sourceInfo),
         L: loadChunkByUrl.bind(null, sourceInfo),

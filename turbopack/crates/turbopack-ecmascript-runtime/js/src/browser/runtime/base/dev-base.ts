@@ -12,7 +12,10 @@
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
-const devModuleCache: ModuleCache<HotModule> = Object.create(null)
+const devModuleCache: ModuleCache<HotModule> = new Map()
+// A view on `devModuleCache` as an object
+// TODO: allocate this on demand, it is rarely needed
+const devModuleRequireCache = asRequireCache(devModuleCache)
 
 // This file must not use `import` and `export` statements. Otherwise, it
 // becomes impossible to augment interfaces declared in `<reference>`d files
@@ -84,7 +87,7 @@ function getOrInstantiateRuntimeModule(
   moduleId: ModuleId,
   chunkPath: ChunkPath
 ): Module {
-  const module = devModuleCache[moduleId]
+  const module = devModuleCache.get(moduleId)
   if (module) {
     if (module.error) {
       throw module.error
@@ -109,7 +112,7 @@ const getOrInstantiateModuleFromParent: GetOrInstantiateModuleFromParent<
     )
   }
 
-  const module = devModuleCache[id]
+  const module = devModuleCache.get(id)
 
   if (sourceModule.children.indexOf(id) === -1) {
     sourceModule.children.push(id)
@@ -133,7 +136,7 @@ function instantiateModule(moduleId: ModuleId, source: SourceInfo): Module {
   // We are in development, this is always a string.
   let id = moduleId as string
 
-  const moduleFactory = moduleFactories[id]
+  const moduleFactory = moduleFactories.get(id)
   if (typeof moduleFactory !== 'function') {
     // This can happen if modules incorrectly handle HMR disposes/updates,
     // e.g. when they keep a `setTimeout` around which still executes old code
@@ -189,7 +192,7 @@ function instantiateModule(moduleId: ModuleId, source: SourceInfo): Module {
     hot,
   }
 
-  devModuleCache[id] = module
+  devModuleCache.set(id, module)
   moduleHotState.set(module, hotState)
 
   // NOTE(alexkirsz) This can fail when the module encounters a runtime error.
@@ -211,7 +214,7 @@ function instantiateModule(moduleId: ModuleId, source: SourceInfo): Module {
           v: exportValue.bind(null, module, devModuleCache),
           n: exportNamespace.bind(null, module, devModuleCache),
           m: module,
-          c: devModuleCache,
+          c: devModuleRequireCache,
           C: null,
           M: moduleFactories,
           l: loadChunk.bind(null, sourceInfo),
@@ -406,7 +409,7 @@ function computeOutdatedSelfAcceptedModules(
     errorHandler: true | Function
   }[] = []
   for (const moduleId of outdatedModules) {
-    const module = devModuleCache[moduleId]
+    const module = devModuleCache.get(moduleId)!
     const hotState = moduleHotState.get(module)!
     if (module && hotState.selfAccepted && !hotState.selfInvalidated) {
       outdatedSelfAcceptedModules.push({
@@ -461,9 +464,9 @@ function disposePhase(
   // We also want to keep track of previous parents of the outdated modules.
   const outdatedModuleParents = new Map()
   for (const moduleId of outdatedModules) {
-    const oldModule = devModuleCache[moduleId]
+    const oldModule = devModuleCache.get(moduleId)
     outdatedModuleParents.set(moduleId, oldModule?.parents)
-    delete devModuleCache[moduleId]
+    devModuleCache.delete(moduleId)
   }
 
   // TODO(alexkirsz) Dependencies: remove outdated dependency from module
@@ -486,7 +489,7 @@ function disposePhase(
  * the module from the module id in the cache.
  */
 function disposeModule(moduleId: ModuleId, mode: 'clear' | 'replace') {
-  const module = devModuleCache[moduleId]
+  const module = devModuleCache.get(moduleId)
   if (!module) {
     return
   }
@@ -512,7 +515,7 @@ function disposeModule(moduleId: ModuleId, mode: 'clear' | 'replace') {
   // It will be added back once the module re-instantiates and imports its
   // children again.
   for (const childId of module.children) {
-    const child = devModuleCache[childId]
+    const child = devModuleCache.get(childId)
     if (!child) {
       continue
     }
@@ -525,7 +528,7 @@ function disposeModule(moduleId: ModuleId, mode: 'clear' | 'replace') {
 
   switch (mode) {
     case 'clear':
-      delete devModuleCache[module.id]
+      devModuleCache.delete(module.id)
       moduleHotData.delete(module.id)
       break
     case 'replace':
@@ -547,7 +550,7 @@ function applyPhase(
 ) {
   // Update module factories.
   for (const [moduleId, factory] of newModuleFactories.entries()) {
-    moduleFactories[moduleId] = factory
+    moduleFactories.set(moduleId, factory)
   }
 
   // TODO(alexkirsz) Run new runtime entries here.
@@ -564,7 +567,7 @@ function applyPhase(
     } catch (err) {
       if (typeof errorHandler === 'function') {
         try {
-          errorHandler(err, { moduleId, module: devModuleCache[moduleId] })
+          errorHandler(err, { moduleId, module: devModuleCache.get(moduleId) })
         } catch (err2) {
           reportError(err2)
           reportError(err)
@@ -829,7 +832,7 @@ function getAffectedModuleEffects(moduleId: ModuleId): ModuleEffect {
       }
     }
 
-    const module = devModuleCache[moduleId]
+    const module = devModuleCache.get(moduleId)!
     const hotState = moduleHotState.get(module)!
 
     if (
@@ -859,7 +862,7 @@ function getAffectedModuleEffects(moduleId: ModuleId): ModuleEffect {
     }
 
     for (const parentId of module.parents) {
-      const parent = devModuleCache[parentId]
+      const parent = devModuleCache.get(parentId)
 
       if (!parent) {
         // TODO(alexkirsz) Is this even possible?
